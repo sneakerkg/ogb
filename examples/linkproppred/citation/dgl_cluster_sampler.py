@@ -29,7 +29,7 @@ class ClusterIterDataset(Dataset):
     '''The partition sampler given a DGLGraph and partition number.
     The metis is used as the graph partition backend.
     '''
-    def __init__(self, dn, g, psize, seed_nid, use_pp=True):
+    def __init__(self, dn, g, psize, use_pp=True):
         """Initialize the sampler.
 
         Paramters
@@ -46,8 +46,7 @@ class ClusterIterDataset(Dataset):
             Whether to use precompute of AX
         """
         self.use_pp = use_pp
-        self.g = g.subgraph(seed_nid)
-        self.g.copy_from_parent()
+        self.g = g
 
         # precalc the aggregated features from training graph only
         if use_pp:
@@ -94,7 +93,10 @@ class ClusterIterDataset(Dataset):
         return self.par_li[idx]
 
 def subgraph_collate_fn(g, batch):
-    g1 = g.subgraph(np.concatenate(
-        batch).reshape(-1).astype(np.int64))
-    g1.copy_from_parent()
+    nids = np.concatenate(batch).reshape(-1).astype(np.int64)
+    g1 = g.subgraph({'_U': nids})
+    #g1.copy_from_parent()
+    for k in g.node_attr_schemes().keys():
+        g1.ndata[k] = g.ndata[k][nids]
+    
     return g1

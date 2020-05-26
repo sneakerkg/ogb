@@ -89,6 +89,12 @@ def train(model, predictor, loader, optimizer, device):
     total_loss = total_examples = 0
     epoch_st_time = time()
 
+    to_device_time = 0
+    ff_time = 0
+    pred_time = 0
+    bp_time = 0
+
+
     for g_data in loader:
         optimizer.zero_grad()
         feat = g_data.ndata['feat'].to(device)
@@ -187,13 +193,23 @@ def main():
     dataset = DglLinkPropPredDataset(name='ogbl-citation')
     split_edge = dataset.get_edge_split()
     g_data = dgl.to_bidirected(dataset[0])
+    g_data = dgl.as_heterograph(g_data)
+    print(g_data, type(g_data))
     for k in dataset[0].node_attr_schemes().keys():
         g_data.ndata[k] = dataset[0].ndata[k]
 
-    train_nid = torch.unique(torch.cat([split_edge['train']['source_node'], split_edge['train']['target_node']]))
+    train_nid = torch.unique(torch.cat([split_edge['train']['source_node'], split_edge  ['train']['target_node']]))
+    train_g = g_data.subgraph({'_U' : train_nid})
 
-    cluster_dataset = ClusterIterDataset('ogbl-citation', g_data, args.num_partitions, train_nid, use_pp=False)
-    cluster_iterator = DataLoader(cluster_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers , collate_fn=partial(subgraph_collate_fn, g_data))
+    for k in g_data.node_attr_schemes().keys():
+        train_g.ndata[k] = g_data.ndata[k][train_nid]
+
+    train_g.in_degree(0)
+    train_g.out_degree(0)
+    train_g.find_edges(0)
+
+    cluster_dataset = ClusterIterDataset('ogbl-citation', train_g, args.num_partitions, use_pp=False)
+    cluster_iterator = DataLoader(cluster_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers , collate_fn=partial(subgraph_collate_fn, train_g))
 
     # We randomly pick some training samples that we want to evaluate on:
     torch.manual_seed(12345)
