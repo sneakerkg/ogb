@@ -2,6 +2,8 @@ import argparse
 from time import time
 from functools import partial
 
+from gpuinfo import GPUInfo
+
 import torch
 import numpy as np
 import torch.nn.functional as F
@@ -91,14 +93,23 @@ def train(model, predictor, loader, optimizer, device):
 
     to_device_time = 0
     ff_time = 0
-    pred_time = 0
+    pred_loss_time = 0
     bp_time = 0
 
 
     for g_data in loader:
         optimizer.zero_grad()
+
+        tmp_time = time()
         feat = g_data.ndata['feat'].to(device)
+        to_device_time += (time() - tmp_time)
+
+        
+        tmp_time = time()        
         h = model(g_data, feat)
+        ff_time += (time() - tmp_time)
+
+        tmp_time = time()        
         src, dst = g_data.all_edges()
         pos_out = predictor(h[src], h[dst])
         pos_loss = -torch.log(pos_out + 1e-15).mean()
@@ -110,15 +121,39 @@ def train(model, predictor, loader, optimizer, device):
         neg_loss = -torch.log(1 - neg_out + 1e-15).mean()
 
         loss = pos_loss + neg_loss
+        pred_loss_time += (time() - tmp_time)
+
+
+        tmp_time = time()        
         loss.backward()
         optimizer.step()
+        bp_time += (time() - tmp_time)
 
         num_examples = src.size(0)
         total_loss += loss.item() * num_examples
         total_examples += num_examples
     
-    print ('epoch time: ', time() - epoch_st_time)
-    return total_loss / total_examples
+    epoch_time = time() - epoch_st_time
+    print ('epoch time: ', epoch_time)
+    io_time = epoch_time - to_device_time - ff_time - pred_loss_time - bp_time
+    memory = [0]
+    
+    '''
+    print ('to_device_time: ', to_device_time)
+    print ('ff_time: ', ff_time)
+    print ('pred_loss_time: ', pred_loss_time)
+    print ('bp_time: ', bp_time)
+    print ('io_time: ', io_time)
+    #percent,memory=GPUInfo.gpu_usage()
+    print ('memory: ', memory)
+
+
+    print ('\n')
+    '''
+
+
+
+    return total_loss / total_examples, epoch_time, to_device_time, ff_time, pred_loss_time, bp_time, io_time, memory
 
 
 @torch.no_grad()
@@ -234,11 +269,32 @@ def main():
         optimizer = torch.optim.Adam(
             list(model.parameters()) + list(predictor.parameters()),
             lr=args.lr)
+
+        epoch_time, to_device_time, ff_time, pred_loss_time, bp_time, io_time, memory = 0, 0, 0, 0, 0, 0, 0
         for epoch in range(1, 1 + args.epochs):
-            loss = train(model, predictor, cluster_iterator, optimizer, device)
+            loss, c_epoch_time, c_to_device_time, c_ff_time, c_pred_loss_time, c_bp_time, c_io_time, c_memory = train(model, predictor, cluster_iterator, optimizer, device)
             print(f'Run: {run + 1:02d}, Epoch: {epoch:02d}, Loss: {loss:.4f}')
+            epoch_time += c_epoch_time
+            to_device_time += c_to_device_time
+            ff_time += c_ff_time
+            pred_loss_time += c_pred_loss_time
+            bp_time += c_bp_time
+            io_time += c_io_time
+            memory = max(memory, c_memory[0])
+
 
             if epoch % args.eval_steps == 0:
+                print ('Ave')
+                print ('epoch time: ', epoch_time / args.eval_steps)
+                print ('to_device_time: ', to_device_time/ args.eval_steps)
+                print ('ff_time: ', ff_time / args.eval_steps)
+                print ('pred_loss_time: ', pred_loss_time / args.eval_steps)
+                print ('bp_time: ', bp_time / args.eval_steps)
+                print ('io_time: ', io_time / args.eval_steps)
+                print ('max memory', memory)
+                print ('\n')
+                epoch_time, to_device_time, ff_time, pred_loss_time, bp_time, io_time, memory = 0, 0, 0, 0, 0, 0, 0
+
                 result = test(model, predictor, g_data, split_edge, evaluator,
                               64 * 4 * args.batch_size, device)
                 logger.add_result(run, result)
