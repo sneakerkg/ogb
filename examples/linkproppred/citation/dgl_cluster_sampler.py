@@ -1,15 +1,35 @@
 import os
 import random
+import numpy as np
 
 import torch
-import dgl.function as fn
-from dgl_partition_utils import *
+from torch.utils.data import Dataset
 
-class ClusterIter(object):
+import dgl.function as fn
+
+def arg_list(labels):
+    hist, indexes, inverse, counts = np.unique(
+        labels, return_index=True, return_counts=True, return_inverse=True)
+    li = []
+    for h in hist:
+        li.append(np.argwhere(inverse == h))
+    return li
+
+def get_partition_list(g, psize):
+    tmp_time = time()
+    print("getting adj using time{:.4f}".format(time() - tmp_time))
+    print("run metis with partition size {}".format(psize))
+    nd_group = dgl.transform.metis_partition_assignment(g, psize)
+    print("metis finished in {} seconds.".format(time() - tmp_time))
+    print("train group {}".format(len(nd_group)))
+    al = arg_list(nd_group)
+    return al
+
+class ClusterIterDataset(Dataset):
     '''The partition sampler given a DGLGraph and partition number.
     The metis is used as the graph partition backend.
     '''
-    def __init__(self, dn, g, psize, batch_size, seed_nid, use_pp=True):
+    def __init__(self, dn, g, psize, seed_nid, use_pp=True):
         """Initialize the sampler.
 
         Paramters
@@ -20,8 +40,6 @@ class ClusterIter(object):
             The full graph of dataset
         psize: int
             The partition number
-        batch_size: int
-            The number of partitions in one batch
         seed_nid: np.ndarray
             The training nodes ids, used to extract the training graph
         use_pp: bool
@@ -37,7 +55,6 @@ class ClusterIter(object):
             print('precalculating')
 
         self.psize = psize
-        self.batch_size = batch_size
         # cache the partitions of known datasets&partition number
         if dn:
             fn = os.path.join('./datasets/', dn + '_{}.npy'.format(psize))
@@ -49,11 +66,6 @@ class ClusterIter(object):
                 np.save(fn, self.par_li)
         else:
             self.par_li = get_partition_list(self.g, psize)
-        self.max = int((psize) // batch_size)
-        if psize % batch_size:
-            self.max += 1
-        random.shuffle(self.par_li)
-        self.get_fn = get_subgraph
 
     def precalc(self, g):
         norm = self.get_norm(g)
@@ -76,18 +88,13 @@ class ClusterIter(object):
         return norm
 
     def __len__(self):
-        return self.max
+        return self.psize
 
-    def __iter__(self):
-        self.n = 0
-        return self
+    def __getitem__(self, idx):
+        return self.par_li[idx]
 
-    def __next__(self):
-        if self.n < self.max:
-            result = self.get_fn(self.g, self.par_li, self.n,
-                                 self.psize, self.batch_size)
-            self.n += 1
-            return result
-        else:
-            random.shuffle(self.par_li)
-            raise StopIteration
+def subgraph_collate_fn(g, batch):
+    g1 = g.subgraph(np.concatenate(
+        batch).reshape(-1).astype(np.int64))
+    g1.copy_from_parent()
+    return g1

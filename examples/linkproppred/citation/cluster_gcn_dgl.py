@@ -1,5 +1,6 @@
 import argparse
 from time import time
+from functools import partial
 
 import torch
 import numpy as np
@@ -9,7 +10,7 @@ from torch.utils.data import DataLoader
 import dgl
 import dgl.nn as nn
 import dgl.function as fn
-from dgl_cluster_sampler import ClusterIter
+from dgl_cluster_sampler import ClusterIterDataset, subgraph_collate_fn
 
 from ogb.linkproppred import DglLinkPropPredDataset, Evaluator
 
@@ -86,11 +87,12 @@ def train(model, predictor, loader, optimizer, device):
     model.train()
 
     total_loss = total_examples = 0
-    tmp_time = time()
+    epoch_st_time = time()
+
     for g_data in loader:
         optimizer.zero_grad()
-        g_data.copy_from_parent()
-        h = model(g_data, g_data.ndata['feat'].to(device))
+        feat = g_data.ndata['feat'].to(device)
+        h = model(g_data, feat)
         src, dst = g_data.all_edges()
         pos_out = predictor(h[src], h[dst])
         pos_loss = -torch.log(pos_out + 1e-15).mean()
@@ -109,8 +111,7 @@ def train(model, predictor, loader, optimizer, device):
         total_loss += loss.item() * num_examples
         total_examples += num_examples
     
-    print ('epoch time: ', time() - tmp_time)
-
+    print ('epoch time: ', time() - epoch_st_time)
     return total_loss / total_examples
 
 
@@ -168,7 +169,7 @@ def main():
     parser.add_argument('--device', type=int, default=0)
     parser.add_argument('--log_steps', type=int, default=1)
     parser.add_argument('--num_partitions', type=int, default=15000)
-    parser.add_argument('--num_workers', type=int, default=6)
+    parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--num_layers', type=int, default=3)
     parser.add_argument('--hidden_channels', type=int, default=256)
     parser.add_argument('--dropout', type=float, default=0.0)
@@ -191,7 +192,8 @@ def main():
 
     train_nid = torch.unique(torch.cat([split_edge['train']['source_node'], split_edge['train']['target_node']]))
 
-    cluster_iterator = ClusterIter('ogbl-citation', g_data, args.num_partitions, args.batch_size, train_nid, use_pp=False)
+    cluster_dataset = ClusterIterDataset('ogbl-citation', g_data, args.num_partitions, train_nid, use_pp=False)
+    cluster_iterator = DataLoader(cluster_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers , collate_fn=partial(subgraph_collate_fn, g_data))
 
     # We randomly pick some training samples that we want to evaluate on:
     torch.manual_seed(12345)
