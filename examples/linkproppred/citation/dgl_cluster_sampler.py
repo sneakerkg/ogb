@@ -1,10 +1,12 @@
 import os
 import random
 import numpy as np
+from time import time
 
 import torch
 from torch.utils.data import Dataset
 
+import dgl
 import dgl.function as fn
 
 def arg_list(labels):
@@ -93,10 +95,11 @@ class ClusterIterDataset(Dataset):
         return self.par_li[idx]
 
 def subgraph_collate_fn(g, batch):
-    nids = np.concatenate(batch).reshape(-1).astype(np.int64)
+    nids = np.concatenate(batch).reshape(-1).astype(np.int64)    
     g1 = g.subgraph({'_U': nids})
-    #g1.copy_from_parent()
     for k in g.node_attr_schemes().keys():
         g1.ndata[k] = g.ndata[k][nids]
-    
+    g1.in_degree(0)
+    g1.out_degree(0)
+    g1.find_edges(0)
     return g1

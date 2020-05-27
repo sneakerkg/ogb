@@ -87,6 +87,7 @@ class LinkPredictor(torch.nn.Module):
 
 def train(model, predictor, loader, optimizer, device):
     model.train()
+    predictor.train()
 
     total_loss = total_examples = 0
     epoch_st_time = time()
@@ -104,7 +105,6 @@ def train(model, predictor, loader, optimizer, device):
         feat = g_data.ndata['feat'].to(device)
         to_device_time += (time() - tmp_time)
 
-        
         tmp_time = time()        
         h = model(g_data, feat)
         ff_time += (time() - tmp_time)
@@ -112,6 +112,7 @@ def train(model, predictor, loader, optimizer, device):
         tmp_time = time()        
         src, dst = g_data.all_edges()
         pos_out = predictor(h[src], h[dst])
+
         pos_loss = -torch.log(pos_out + 1e-15).mean()
 
         # Just do some trivial random sampling.
@@ -122,7 +123,6 @@ def train(model, predictor, loader, optimizer, device):
 
         loss = pos_loss + neg_loss
         pred_loss_time += (time() - tmp_time)
-
 
         tmp_time = time()        
         loss.backward()
@@ -137,33 +137,16 @@ def train(model, predictor, loader, optimizer, device):
     print ('epoch time: ', epoch_time)
     io_time = epoch_time - to_device_time - ff_time - pred_loss_time - bp_time
     memory = [0]
-    
-    '''
-    print ('to_device_time: ', to_device_time)
-    print ('ff_time: ', ff_time)
-    print ('pred_loss_time: ', pred_loss_time)
-    print ('bp_time: ', bp_time)
-    print ('io_time: ', io_time)
-    #percent,memory=GPUInfo.gpu_usage()
-    print ('memory: ', memory)
-
-
-    print ('\n')
-    '''
-
-
-
     return total_loss / total_examples, epoch_time, to_device_time, ff_time, pred_loss_time, bp_time, io_time, memory
 
 
 @torch.no_grad()
 def test(model, predictor, data, split_edge, evaluator, batch_size, device):
+    model.eval()
     predictor.eval()
     tmp_time = time()
     print('Evaluating full-batch GNN on CPU...')
 
-    weights = [(conv.weight.cpu().detach().numpy(),
-                conv.bias.cpu().detach().numpy()) for conv in model.convs]
     model.to(torch.device('cpu'))
 
     h = model(data, data.ndata['feat']).to(device)
@@ -227,24 +210,26 @@ def main():
 
     dataset = DglLinkPropPredDataset(name='ogbl-citation')
     split_edge = dataset.get_edge_split()
-    g_data = dgl.to_bidirected(dataset[0])
-    g_data = dgl.as_heterograph(g_data)
-    print(g_data, type(g_data))
+    
+    # Manually add self-loop link since GCN will wash out the feature of isolated nodes.
+    # We should not handle it manually, but in GraphConv module instead.  
+    n_nodes = dataset[0].number_of_nodes()
+    dataset[0].readonly(False) 
+    dataset[0].add_edges(torch.arange(n_nodes).long(), torch.arange(n_nodes).long())
+    dataset[0].readonly(True)
+    homo_g_data = dgl.to_bidirected(dataset[0])
+
+    g_data = dgl.as_heterograph(homo_g_data)
     for k in dataset[0].node_attr_schemes().keys():
         g_data.ndata[k] = dataset[0].ndata[k]
+    
+    g_data.in_degree(0)
+    g_data.out_degree(0)
+    g_data.find_edges(0)
 
-    train_nid = torch.unique(torch.cat([split_edge['train']['source_node'], split_edge  ['train']['target_node']]))
-    train_g = g_data.subgraph({'_U' : train_nid})
-
-    for k in g_data.node_attr_schemes().keys():
-        train_g.ndata[k] = g_data.ndata[k][train_nid]
-
-    train_g.in_degree(0)
-    train_g.out_degree(0)
-    train_g.find_edges(0)
-
-    cluster_dataset = ClusterIterDataset('ogbl-citation', train_g, args.num_partitions, use_pp=False)
-    cluster_iterator = DataLoader(cluster_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers , collate_fn=partial(subgraph_collate_fn, train_g))
+    # Has to use homo graph since metis transform does not take heterograph
+    cluster_dataset = ClusterIterDataset('ogbl-citation', homo_g_data, args.num_partitions, use_pp=False)
+    cluster_iterator = DataLoader(cluster_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers , collate_fn=partial(subgraph_collate_fn, g_data))
 
     # We randomly pick some training samples that we want to evaluate on:
     torch.manual_seed(12345)
@@ -281,7 +266,6 @@ def main():
             bp_time += c_bp_time
             io_time += c_io_time
             memory = max(memory, c_memory[0])
-
 
             if epoch % args.eval_steps == 0:
                 print ('Ave')
