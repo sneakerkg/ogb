@@ -102,4 +102,12 @@ def subgraph_collate_fn(g, batch):
     g1.in_degree(0)
     g1.out_degree(0)
     g1.find_edges(0)
-    return g1
+    # prepare negative sampling
+    src, _ = g1.all_edges()
+    dst_neg = torch.randint(0, g1.ndata['feat'].size(0), src.size(),
+                            dtype=torch.long, device=src.device)
+    neg_g = dgl.graph((src, dst_neg), num_nodes=g1.number_of_nodes())
+    neg_g.in_degree(0)
+    neg_g.out_degree(0)
+    neg_g.find_edges(0)
+    return g1, neg_g

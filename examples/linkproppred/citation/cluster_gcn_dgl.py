@@ -97,44 +97,56 @@ def train(model, predictor, loader, optimizer, device):
     pred_loss_time = 0
     bp_time = 0
 
+    part_1 = 0
 
-    for g_data in loader:
+
+    for data in loader:
+        g_data, neg_g = data
+        print(g_data.number_of_edges(), neg_g.number_of_edges())
         optimizer.zero_grad()
 
         tmp_time = time()
-        feat = g_data.ndata['feat'].to(device)        
+        feat = g_data.ndata['feat'].to(device)
+        #pos_src, pos_dst = g_data.edges()
+        #neg_src, neg_dst = neg_g.edges()
+        #pos_src = pos_src.to(device)
+        #pos_dst = pos_dst.to(device)
+        #neg_src = neg_src.to(device)
+        #neg_dst = neg_dst.to(device)
         to_device_time += (time() - tmp_time)
 
         tmp_time = time()        
         h = model(g_data, feat)
         g_data.ndata['h'] = h
-        ff_time += (time() - tmp_time)
+        #ff_time += (time() - tmp_time)
         
-        tmp_time = time()
+        #tmp_time = time()
         #pos_out = predictor(h[src], h[dst])
+        tmp_time = time()
         g_data.apply_edges(fn.u_dot_v('h', 'h', 'score'))
+        #g_data.edata['score'] = (h[pos_src] * h[pos_dst]).sum(1)
+        
         pos_out = torch.sigmoid(g_data.edata['score'])
 
         pos_loss = -torch.log(pos_out + 1e-15).mean()
+        pos_loss.item()
+        part_1 += time() - tmp_time
 
-        # Just do some trivial random sampling.
-        src, dst = g_data.all_edges()
-        dst_neg = torch.randint(0, g_data.ndata['feat'].size(0), src.size(),
-                                dtype=torch.long, device=device)
+        tmp_time = time()
+        neg_g.ndata['h'] = g_data.ndata['h']
 
-        neg_g = dgl.graph((src.cpu(), dst_neg.cpu()), num_nodes=g_data.number_of_nodes())
-        neg_g = dgl.compact_graphs([neg_g])[0]
-        neg_g.ndata['h'] = h[neg_g.ndata['_ID']]
+        #part_1 += (time() - tmp_time)
+        #tmp_time = time()  
+
         neg_g.apply_edges(fn.u_dot_v('h', 'h', 'score'))
+        #neg_g.edata['score'] = (h[neg_src] * h[neg_dst]).sum(1)
         neg_out = torch.sigmoid(neg_g.edata['score'])
-
-
-
 
         #neg_out = predictor(h[src], h[dst_neg])
         neg_loss = -torch.log(1 - neg_out + 1e-15).mean()
 
         loss = pos_loss + neg_loss
+        loss.item()
         pred_loss_time += (time() - tmp_time)
 
         tmp_time = time()        
@@ -142,15 +154,16 @@ def train(model, predictor, loader, optimizer, device):
         optimizer.step()
         bp_time += (time() - tmp_time)
 
-        num_examples = src.size(0)
+        num_examples = g_data.number_of_edges()
         total_loss += loss.item() * num_examples
         total_examples += num_examples
     
     epoch_time = time() - epoch_st_time
-    print ('epoch time: ', epoch_time)
+    print ('epoch time: ', epoch_time, 'to_dev_time:', to_device_time, 'dec1_time:', part_1, 'dec2_time:', pred_loss_time)
     io_time = epoch_time - to_device_time - ff_time - pred_loss_time - bp_time
     memory = [0]
-    return total_loss / (total_examples+1e-6), epoch_time, to_device_time, ff_time, pred_loss_time, bp_time, io_time, memory
+    exit(0)
+    return total_loss / (total_examples+1e-6), epoch_time, to_device_time, ff_time, pred_loss_time, bp_time, io_time, memory, part_1
 
 
 @torch.no_grad()
@@ -268,9 +281,9 @@ def main():
             list(model.parameters()) + list(predictor.parameters()),
             lr=args.lr)
 
-        epoch_time, to_device_time, ff_time, pred_loss_time, bp_time, io_time, memory = 0, 0, 0, 0, 0, 0, 0
+        epoch_time, to_device_time, ff_time, pred_loss_time, bp_time, io_time, memory, part_1 = 0, 0, 0, 0, 0, 0, 0, 0
         for epoch in range(1, 1 + args.epochs):
-            loss, c_epoch_time, c_to_device_time, c_ff_time, c_pred_loss_time, c_bp_time, c_io_time, c_memory = train(model, predictor, cluster_iterator, optimizer, device)
+            loss, c_epoch_time, c_to_device_time, c_ff_time, c_pred_loss_time, c_bp_time, c_io_time, c_memory, c_part1 = train(model, predictor, cluster_iterator, optimizer, device)
             print(f'Run: {run + 1:02d}, Epoch: {epoch:02d}, Loss: {loss:.4f}')
             epoch_time += c_epoch_time
             to_device_time += c_to_device_time
@@ -278,6 +291,7 @@ def main():
             pred_loss_time += c_pred_loss_time
             bp_time += c_bp_time
             io_time += c_io_time
+            part_1 += c_part1
             memory = max(memory, c_memory[0])
 
             if epoch % args.eval_steps == 0:
@@ -285,14 +299,14 @@ def main():
                 print ('epoch time: ', epoch_time / args.eval_steps)
                 print ('to_device_time: ', to_device_time/ args.eval_steps)
                 print ('ff_time: ', ff_time / args.eval_steps)
+                print ('part1_time: ', part_1 / args.eval_steps)
                 print ('pred_loss_time: ', pred_loss_time / args.eval_steps)
                 print ('bp_time: ', bp_time / args.eval_steps)
                 print ('io_time: ', io_time / args.eval_steps)
                 print ('max memory', memory)
                 print ('\n')
-                epoch_time, to_device_time, ff_time, pred_loss_time, bp_time, io_time, memory = 0, 0, 0, 0, 0, 0, 0
+                epoch_time, to_device_time, ff_time, pred_loss_time, bp_time, io_time, memory, part_1 = 0, 0, 0, 0, 0, 0, 0, 0
 
-                '''
                 result = test(model, predictor, g_data, split_edge, evaluator,
                               64 * 4 * args.batch_size, device)
                 logger.add_result(run, result)
@@ -305,7 +319,6 @@ def main():
                           f'Train: {train_mrr:.4f}, '
                           f'Valid: {valid_mrr:.4f}, '
                           f'Test: {test_mrr:.4f}')
-                '''
 
         logger.print_statistics(run)
     logger.print_statistics()
